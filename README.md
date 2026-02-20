@@ -53,9 +53,30 @@ docker sandbox version
 ## How Auth Works
 
 ### Mode A: OAuth Token Injection
-The script reads your token from `~/.claude/.credentials.json` and passes it as `CLAUDE_CODE_OAUTH_TOKEN` env var to the container. The Dockerfile sets `hasCompletedOnboarding: true` in `~/.claude.json` so cc accepts the token.
+The script auto-extracts your token using a 3-step fallback:
 
-Token expires in 8-12 hours. For overnight runs, CPM v4 will use a Token Refresh Sidecar.
+1. **Environment variable** — `CLAUDE_CODE_OAUTH_TOKEN` (from `.env` or `export`)
+2. **macOS Keychain** — Claude Code 2025+ stores credentials under service `"Claude Code-credentials"` as a JSON blob containing `accessToken`, `refreshToken`, expiry, and plan info
+3. **Legacy file** — `~/.claude/.credentials.json` (older cc versions)
+
+The token is passed as `CLAUDE_CODE_OAUTH_TOKEN` env var to the container. The Dockerfile sets `hasCompletedOnboarding: true` in `~/.claude.json` so cc accepts the token.
+
+Token expires in ~29 hours (Max plan). For overnight runs, CPM v4 will use a Token Refresh Sidecar.
+
+You can inspect your token manually:
+```bash
+# Human-readable summary
+node extract-token.mjs
+
+# Raw token for scripting
+node extract-token.mjs --token-only
+
+# Shell export statement
+node extract-token.mjs --export
+
+# Full JSON with expiry, plan, scopes
+node extract-token.mjs --json
+```
 
 ### Mode B: Docker Desktop Proxy
 Docker Desktop runs an HTTP/HTTPS proxy on `host.docker.internal:3128`. When cc makes API calls from inside the sandbox, the proxy automatically injects credentials from your host environment. **No token management needed.**
@@ -121,10 +142,22 @@ cc-docker-demo/
 
 ### Mode A: "OAuth token expired"
 ```bash
-# Re-authenticate
+# Re-authenticate (refreshes Keychain token)
 claude
 # Then retry
 npm run docker
+```
+
+### Mode A: "No OAuth token found"
+```bash
+# Check what tokens are available
+node extract-token.mjs
+
+# Or manually extract from macOS Keychain
+security find-generic-password -s "Claude Code-credentials" -w | node -e "
+  const d=JSON.parse(require('fs').readFileSync('/dev/stdin','utf8'));
+  console.log(d.claudeAiOauth.accessToken.slice(0,20)+'...')
+"
 ```
 
 ### Mode B: "Docker Sandbox not available"
