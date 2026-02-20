@@ -1,22 +1,28 @@
 # cc-docker-demo v2
 
-Proof-of-concept for CPM v4: Run Claude Code in **two isolation modes** and compare.
+Proof-of-concept for CPM v4: Run Claude Code in isolated environments and compare.
 
-## The Two Modes
+## The Three Modes
 
 ### Mode A: Plain Docker Container
 - Standard `docker run` with custom Dockerfile
 - cc installed via `npm install -g @anthropic-ai/claude-code`
-- Auth: `CLAUDE_CODE_OAUTH_TOKEN` env var (Max plan)
+- Auth: `CLAUDE_CODE_OAUTH_TOKEN` env var (auto-extracted from macOS Keychain)
 - Isolation: Container (shared host kernel)
 - Works with: Docker Engine, Docker Desktop, **Podman**
 
 ### Mode B: Docker Sandbox (microVM)
 - Docker Desktop's purpose-built agent sandbox
-- Each sandbox runs in a **dedicated microVM** with separate kernel
+- Each sandbox runs in a **dedicated Firecracker microVM** with separate kernel
 - Auth: Docker Desktop's host-side proxy (automatic credential injection)
 - Network: Built-in allow/deny lists via `docker sandbox network proxy`
 - Works with: Docker Desktop 4.58+ (macOS, Windows, experimental Linux)
+
+### Mode C: Fly.io Ephemeral Machine
+- Claude Code runs in a **remote Firecracker microVM** on Fly.io
+- Machine is auto-deleted after the task completes (`--rm`)
+- Auth: OAuth token passed via `--env` to `fly machine run` (sent over HTTPS to Fly API, not in logs)
+- **Why Fly.io?** Long autonomous coding tasks that cost significant $ on the API run for free on a Max plan subscription. `CLAUDE_CODE_OAUTH_TOKEN` works identically to Mode A — Fly.io is just a remote host.
 
 ## Quick Start
 
@@ -26,18 +32,19 @@ npm install
 # Auto-detect available runtimes and run what's possible
 npm start
 
-# Or pick a specific mode:
-npm run docker      # Mode A only
-npm run sandbox     # Mode B only
-npm run both        # Run both, compare results
+# Pick a specific mode:
+npm run docker      # Mode A: plain Docker container
+npm run sandbox     # Mode B: Docker Sandbox microVM
+npm run both        # Run both A and B, compare results
 npm run podman      # Mode A with Podman
+npm run fly         # Mode C: Fly.io ephemeral machine
 ```
 
 ## Prerequisites
 
 ### Mode A (Docker/Podman)
 - Docker Engine or Podman
-- Authenticated Claude Code (`claude` runs without login)
+- Authenticated Claude Code (`claude` runs without login prompt)
 - Claude Max plan
 
 ### Mode B (Docker Sandbox)
@@ -50,76 +57,84 @@ Check your Docker Desktop version:
 docker sandbox version
 ```
 
+### Mode C (Fly.io)
+- [Fly.io account](https://fly.io) + `fly` CLI installed (`brew install flyctl`)
+- Claude Max plan (same token as Mode A)
+- One-time setup:
+
+```bash
+# 1. Edit fly.toml — set your app name (globally unique) and org
+# 2. Create the app
+fly launch --copy-config --no-deploy
+
+# 3. Build and push image to Fly registry
+npm run fly:build
+
+# 4. Run
+npm run fly
+```
+
+When the token expires (~29h), refresh it:
+```bash
+node extract-token.mjs   # updates .env automatically
+npm run fly              # picks up fresh token on next run
+```
+
 ## How Auth Works
 
-### Mode A: OAuth Token Injection
+### Mode A & C: OAuth Token
 The script auto-extracts your token using a 3-step fallback:
 
 1. **Environment variable** — `CLAUDE_CODE_OAUTH_TOKEN` (from `.env` or `export`)
-2. **macOS Keychain** — Claude Code 2025+ stores credentials under service `"Claude Code-credentials"` as a JSON blob containing `accessToken`, `refreshToken`, expiry, and plan info
+2. **macOS Keychain** — Claude Code stores credentials under service `"Claude Code-credentials"` as a JSON blob
 3. **Legacy file** — `~/.claude/.credentials.json` (older cc versions)
 
-The token is passed as `CLAUDE_CODE_OAUTH_TOKEN` env var to the container. The Dockerfile sets `hasCompletedOnboarding: true` in `~/.claude.json` so cc accepts the token.
+For Mode A, the token is passed as env var to the container. For Mode C, it is passed via `--env` in `fly machine run` — transmitted over HTTPS to the Fly API, not visible in shell history or logs.
 
-Token expires in ~29 hours (Max plan). For overnight runs, CPM v4 will use a Token Refresh Sidecar.
+The Dockerfile sets `hasCompletedOnboarding: true` in `~/.claude.json` so cc accepts the token without interactive prompts.
 
-You can inspect your token manually:
+Inspect your token:
 ```bash
-# Human-readable summary
-node extract-token.mjs
-
-# Raw token for scripting
-node extract-token.mjs --token-only
-
-# Shell export statement
-node extract-token.mjs --export
-
-# Full JSON with expiry, plan, scopes
-node extract-token.mjs --json
+node extract-token.mjs              # human-readable summary (updates .env)
+node extract-token.mjs --token-only # raw token for scripting
+node extract-token.mjs --export     # shell export statement
+node extract-token.mjs --json       # full JSON with expiry, plan, scopes
 ```
 
 ### Mode B: Docker Desktop Proxy
 Docker Desktop runs an HTTP/HTTPS proxy on `host.docker.internal:3128`. When cc makes API calls from inside the sandbox, the proxy automatically injects credentials from your host environment. **No token management needed.**
 
-Credentials never enter the sandbox VM — the proxy intercepts and injects them transparently. When the sandbox is deleted, no credentials remain.
+Credentials never enter the sandbox VM — the proxy intercepts and injects them transparently.
 
-## CPM v4 Mapping
+## Mode Comparison
 
-| This demo | CPM v4 |
-|-----------|--------|
-| `mode-docker.mjs` | `@cpm/runner` container execution strategy |
-| `mode-sandbox.mjs` | `@cpm/runner` sandbox execution strategy |
-| `Dockerfile` | `cpm-runner:node-22` base image |
-| Manual token | Token Refresh Sidecar (Mode A) |
-| Auto-detect | Runtime detection in Permission Resolver |
-| Single prompt | Ralph Wiggum loop with Task persistence |
-| `--both` comparison | CPM recommends best mode per environment |
+|                  | Mode A              | Mode B                     | Mode C                      |
+|------------------|---------------------|----------------------------|-----------------------------|
+| Where            | Local Docker/Podman | Local Docker Desktop       | Fly.io (remote)             |
+| Isolation        | Container           | Firecracker microVM        | Firecracker microVM         |
+| Auth             | `CLAUDE_CODE_OAUTH_TOKEN` | Host-side proxy (auto) | `--env` to Fly API (HTTPS) |
+| Workspace        | Volume mount (`-v`) | Same path                  | Remote (files stay on VM)   |
+| State            | Ephemeral           | Persists                   | Ephemeral (`--rm`)          |
+| Cost             | Free                | Free                       | Fly.io machine time (~free) |
+| Platform         | Anywhere            | macOS / Windows            | Any (remote)                |
+
+> **Mode C workspace note:** Files created by cc live inside the Fly machine. Use `--rm` for stateless tasks, or drop it and use `fly machine exec` / `fly ssh` to retrieve files. For CPM v4, have cc commit results to git as part of the task prompt.
 
 ## Architecture Notes
 
-### Why Two Modes?
+### Why multiple modes?
 
-**Mode A (Container)** is universal — works everywhere Docker or Podman runs, including CI/CD, Linux servers, and environments without Docker Desktop. But containers share the host kernel, so a kernel exploit could escape.
+**Mode A** is universal — works anywhere Docker or Podman runs, including CI/CD and Linux servers. But containers share the host kernel.
 
-**Mode B (Sandbox)** provides stronger isolation via microVMs with dedicated kernels. It also handles credentials, network policies, and Docker-in-Docker natively. But it requires Docker Desktop and is currently macOS/Windows only (experimental Linux).
+**Mode B** gives stronger isolation (microVM) plus auto-credential injection and built-in network policies. Requires Docker Desktop (macOS/Windows only).
 
-CPM v4 should support both:
-- **Local dev (macOS/Windows)**: Prefer Mode B for strongest isolation + auto-auth
-- **CI/CD / Linux servers**: Use Mode A with Podman for free licensing
-- **Enterprise**: Mode B for security requirements + built-in network policies
+**Mode C** moves execution off your machine entirely. Useful when you want to run long tasks without keeping a laptop open, or when you need a clean Linux environment. Max plan credentials work identically to Mode A — the Fly microVM just happens to be in Stockholm.
 
-### Key Findings to Verify
+### Log streaming (Mode C)
+`fly machine run` returns as soon as the machine **starts** (not when it exits). Container stdout/stderr goes to Fly's logging infrastructure. `mode-fly.mjs` runs `fly logs` concurrently and watches for the machine exit signal to know when the task is done.
 
-These are hypotheses we're testing with this demo:
-
-1. **Mode B headless**: Does `docker sandbox run claude -p "prompt"` work for headless execution? Or is sandbox interactive-only?
-2. **Mode B exit**: Does sandbox process exit cleanly after `-p` mode completes? Or does the microVM persist?
-3. **Mode A token**: Does `CLAUDE_CODE_OAUTH_TOKEN` work reliably with Max plan in fresh containers?
-4. **Startup time**: How much overhead does microVM boot add vs container start?
-5. **Workspace sync**: Are files created by cc inside sandbox visible immediately on host?
-6. **Network**: Can cc run `npm install` in both modes without issues?
-
-Document findings in RESULTS.md after testing!
+### Why is the app "Suspended" in the Fly dashboard?
+Expected behavior. The app uses `--rm` ephemeral machines — every machine is deleted when cc exits. With 0 running machines, Fly shows the app as "Suspended" (grey). During a run, a machine briefly appears. This is a batch runner, not a web service.
 
 ## File Structure
 
@@ -128,24 +143,27 @@ cc-docker-demo/
 ├── run-demo.mjs          # Unified runner (auto-detect, --mode, --runtime)
 ├── mode-docker.mjs       # Mode A: Plain Docker/Podman
 ├── mode-sandbox.mjs      # Mode B: Docker Sandbox microVM
+├── mode-fly.mjs          # Mode C: Fly.io ephemeral machine
 ├── lib/
-│   └── common.mjs        # Shared: token resolution, workspace, detection
-├── extract-token.mjs     # Helper: show OAuth token from cc credentials
-├── Dockerfile            # Mode A: Container image with cc installed
-├── .env.example          # Mode A: Token config (Mode B doesn't need it)
-├── .dockerignore
+│   └── common.mjs        # Shared: token resolution, TEST_PROMPT, detection
+├── extract-token.mjs     # Show/extract OAuth token from cc credentials
+├── Dockerfile            # cc image (linux/amd64, node:22-slim)
+├── fly.toml              # Fly.io app config (no [[services]] — batch runner only)
+├── .env.example          # Token + Fly.io config template
+├── .gitignore
 ├── package.json
 └── README.md
 ```
 
 ## Troubleshooting
 
-### Mode A: "OAuth token expired"
+### "OAuth token expired"
 ```bash
-# Re-authenticate (refreshes Keychain token)
+# Refresh by opening Claude Code in your terminal
 claude
-# Then retry
-npm run docker
+# Or re-extract and update .env:
+node extract-token.mjs
+npm run fly   # or npm run docker
 ```
 
 ### Mode A: "No OAuth token found"
@@ -164,7 +182,6 @@ security find-generic-password -s "Claude Code-credentials" -w | node -e "
 ```bash
 # Check Docker Desktop version (need 4.58+)
 docker version
-# Upgrade Docker Desktop if needed
 ```
 
 ### Mode B: Auth fails inside sandbox
@@ -172,9 +189,16 @@ Docker Sandbox daemon reads env vars from shell config, not current session:
 ```bash
 # Add to ~/.bashrc or ~/.zshrc:
 export CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat01-...
-
 # Then restart Docker Desktop
 ```
+
+### Mode C: "No image ref found"
+```bash
+npm run fly:build   # build + push image (only needed after Dockerfile changes)
+```
+
+### Mode C: fly logs shows old runs
+This is normal — `fly logs` streams all recent app logs, not just the current run. The output section is filtered to the current machine ID automatically. Old log lines appear at startup and scroll away once the new machine starts.
 
 ### Podman: Image build fails
 ```bash
