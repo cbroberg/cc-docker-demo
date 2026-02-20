@@ -26,6 +26,14 @@ npm run fly:build    # Build linux/amd64 image and push to Fly registry
 npm run build        # Build Docker image locally (cpm-runner:demo)
 npm run token:show   # Inspect OAuth token (expiry, plan, scopes)
 npm run sandbox:list # List active Docker Sandboxes (not in docker ps)
+npm run push-token   # Push token from macOS Keychain to remote box via SSH (default host: "ubuntu")
+```
+
+Remote token relay (for Linux machines without Keychain):
+```bash
+npm run push-token                                        # default host + default dir ~/cc-docker-demo
+npm run push-token -- myserver                            # custom SSH host
+CPM_REMOTE_DIR=/home/cb/Apps/cbroberg/cc-docker-demo npm run push-token  # custom remote dir
 ```
 
 Mode C one-time setup:
@@ -89,6 +97,9 @@ Three functions:
 - `runModeFly(options)`: resolves token, starts `fly logs` stream, launches `fly machine run <image> --env CLAUDE_CODE_OAUTH_TOKEN=<token> --rm`, watches log stream for machine exit signal, stops when `machine restart policy set to 'no'` is detected for the current machine ID.
 - Machine ID is parsed from `fly machine run` stdout (`Machine ID: <id>`), used to filter exit detection in the log stream.
 
+### `push-token.mjs`
+Reads the full OAuth token from macOS Keychain (or `.credentials.json` fallback), SSHes into a remote host via `spawnSync('ssh', [host, 'bash', '-s'], { input: script })`, and writes `CLAUDE_CODE_OAUTH_TOKEN=<token>` to `$REMOTE_DIR/.env` (creating or updating the existing line). Target host: `CPM_REMOTE_HOST` env or CLI arg (default `ubuntu`). Target dir: `CPM_REMOTE_DIR` env (default `$HOME/cc-docker-demo`).
+
 ### `Dockerfile`
 `node:22-slim`, cc installed globally, non-root `agent` user, `hasCompletedOnboarding: true` pre-set. Entrypoint: `claude -p --dangerously-skip-permissions`. Build target: `linux/amd64` (Fly.io runs amd64).
 
@@ -117,6 +128,7 @@ App config for `cpm-claude-code-demo` in webhouse org, region `arn` (Stockholm).
 - **Mode A/C**: `resolveToken()` checks: `CLAUDE_CODE_OAUTH_TOKEN` env → macOS Keychain → `~/.claude/.credentials.json`. Token expires ~29h. `node extract-token.mjs` refreshes `.env` from Keychain. For autonomous overnight runs: 29h window is sufficient if token is fresh at task start.
 - **Mode B**: Does NOT use Docker Desktop's host-side proxy for auth (that only works with Docker Desktop's own Claude account, not Claude Code CLI credentials). Instead, `mode-sandbox.mjs` reads the full credentials JSON from macOS Keychain and pipes it into `~/.claude/.credentials.json` inside the persistent sandbox via `docker sandbox exec -i` before each run.
 - **Mode C**: `fly secrets` cannot be used for apps with no persistent machines (secrets get staged but never deployed). Token is passed directly via `--env` in `fly machine run`.
+- **Linux / remote machines**: No Keychain on Linux. Use `push-token.mjs` to SSH from macOS and write `CLAUDE_CODE_OAUTH_TOKEN` to the remote `.env`. Re-run after each 29h expiry. `CPM_REMOTE_DIR` env var overrides the default `$HOME/cc-docker-demo` path.
 
 ## Docker Sandbox Gotchas (discovered through testing)
 

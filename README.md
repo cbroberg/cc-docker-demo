@@ -82,6 +82,49 @@ docker sandbox rm cpm-demo-persistent
 npm run sandbox   # recreates automatically
 ```
 
+### Mode A (Linux / Ubuntu)
+
+Running on a Linux machine (e.g. Ubuntu) without macOS Keychain? Use `push-token.mjs` to relay the token from your Mac to the remote box.
+
+**One-time setup on Ubuntu:**
+```bash
+# 1. Install Node.js 22
+curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash -
+sudo apt-get install -y nodejs
+
+# 2. Clone the repo
+git clone https://github.com/cbroberg/cc-docker-demo ~/cc-docker-demo
+cd ~/cc-docker-demo && npm install
+```
+
+**Token relay from Mac to Ubuntu:**
+```bash
+# On macOS — push token from Keychain to remote .env
+npm run push-token                        # default host "ubuntu", default dir ~/cc-docker-demo
+npm run push-token -- myserver            # custom SSH host
+CPM_REMOTE_DIR=/home/cb/Apps/cbroberg/cc-docker-demo npm run push-token  # custom remote dir
+
+# On Ubuntu — run Mode A
+npm run docker    # or: npm run podman
+```
+
+Token is valid ~29h. Re-run `npm run push-token` after it expires.
+
+**Podman on Ubuntu (rootless):**
+```bash
+# Install via Linuxbrew (includes newer version than Ubuntu repos)
+/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+eval "$(/home/linuxbrew/.linuxbrew/bin/brew shellenv)"
+brew install podman
+
+# uidmap is required for rootless containers
+sudo apt-get install -y uidmap
+
+npm run podman
+```
+
+Add `eval "$(/home/linuxbrew/.linuxbrew/bin/brew shellenv)"` to `~/.bashrc` to keep Podman in PATH across sessions.
+
 ### Mode C (Fly.io)
 - [Fly.io account](https://fly.io) + `fly` CLI installed (`brew install flyctl`)
 - Claude Max plan (same token as Mode A)
@@ -180,9 +223,10 @@ cc-docker-demo/
 ├── mode-docker.mjs       # Mode A: Plain Docker/Podman
 ├── mode-sandbox.mjs      # Mode B: Docker Sandbox microVM (persistent)
 ├── mode-fly.mjs          # Mode C: Fly.io ephemeral machine
+├── push-token.mjs        # Relay token from macOS Keychain → remote box via SSH
+├── extract-token.mjs     # Show/extract OAuth token from cc credentials
 ├── lib/
 │   └── common.mjs        # Shared: token resolution, workspace, TEST_PROMPT, detection
-├── extract-token.mjs     # Show/extract OAuth token from cc credentials
 ├── Dockerfile            # cc image (linux/amd64, node:22-slim)
 ├── fly.toml              # Fly.io app config (no [[services]] — batch runner only)
 ├── .env.example          # Token + Fly.io config template
@@ -238,4 +282,18 @@ Normal — `fly logs` streams all recent app logs. Old lines appear at startup a
 ```bash
 podman machine start   # ensure podman VM is running (macOS)
 npm run podman
+```
+
+### Podman on Ubuntu: "newuidmap: write to uid_map failed"
+```bash
+sudo apt-get install -y uidmap   # required for rootless containers
+npm run podman
+```
+
+### push-token: token written to wrong path
+If your remote repo is not at `~/cc-docker-demo`, specify the path:
+```bash
+CPM_REMOTE_DIR=/home/cb/Apps/cbroberg/cc-docker-demo npm run push-token
+# Or set permanently in your shell:
+export CPM_REMOTE_DIR=/home/cb/Apps/cbroberg/cc-docker-demo
 ```
