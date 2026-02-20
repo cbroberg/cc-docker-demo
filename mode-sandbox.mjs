@@ -10,6 +10,18 @@
 //   - No custom Dockerfile needed — Docker provides the agent template
 //   - Workspace syncs at same absolute path (not volume mount)
 //   - No CLAUDE_CODE_OAUTH_TOKEN needed if already logged into claude
+//
+// Useful lifecycle commands:
+//   docker sandbox ls                             — list all sandboxes (NOT in docker ps)
+//   docker sandbox exec -it <name> bash          — debug shell inside running sandbox
+//   docker sandbox rm <name>                     — delete sandbox and all installed packages
+//   docker sandbox run <name>                    — reconnect to an existing sandbox
+//
+// Immutability: sandbox config (volumes, env vars) cannot be changed after creation.
+// To reconfigure, delete and recreate. That's why we use a timestamp-based name.
+//
+// Docker-in-Docker: add --mount-docker to give the agent access to the host Docker daemon.
+// This is equivalent to root access — only use when you fully trust the agent's actions.
 
 import { spawn, execSync } from 'node:child_process';
 import { createWorkspace, showWorkspaceResults, TEST_PROMPT } from './lib/common.mjs';
@@ -29,6 +41,24 @@ function checkSandboxAvailable() {
     console.error('');
     console.error('   On Linux: Docker Sandbox is experimental (single user, UID 1000 only).');
     return false;
+  }
+}
+
+function warnOrphanedSandboxes() {
+  // Sandboxes persist after disconnection or failed runs — they don't appear
+  // in `docker ps` (they're microVMs), so they're easy to miss and pile up.
+  try {
+    const output = execSync('docker sandbox ls 2>/dev/null', { encoding: 'utf-8' }).trim();
+    const orphans = output.split('\n').filter(line => line.includes('cpm-demo-'));
+    if (orphans.length > 0) {
+      console.warn(`⚠️  Found ${orphans.length} orphaned sandbox(es) from previous runs:`);
+      orphans.forEach(line => console.warn(`   ${line.trim()}`));
+      console.warn('   Clean up with: docker sandbox rm <name>');
+      console.warn('   Or list all: npm run sandbox:list');
+      console.warn('');
+    }
+  } catch {
+    // sandbox ls failed — not blocking
   }
 }
 
@@ -56,6 +86,7 @@ export async function runModeSandbox() {
   console.log('');
 
   // 1. Check sandbox available
+  warnOrphanedSandboxes();
   if (!checkSandboxAvailable()) {
     return { mode: 'sandbox', exitCode: 1, error: 'Docker Sandbox not available' };
   }

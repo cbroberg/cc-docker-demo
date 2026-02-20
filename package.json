@@ -10,7 +10,11 @@
     "both": "node run-demo.mjs --mode both",
     "podman": "node run-demo.mjs --mode docker --runtime podman",
     "build": "docker build -t cpm-runner:demo .",
-    "token:show": "node extract-token.mjs"
+    "token:show": "node extract-token.mjs",
+    "sandbox:list": "docker sandbox ls",
+    "fly": "node mode-fly.mjs",
+    "fly:build": "node mode-fly.mjs --build-only",
+    "fly:build:remote": "fly deploy --build-only"
   },
   "dependencies": {
     "dotenv": "^16.4.7"

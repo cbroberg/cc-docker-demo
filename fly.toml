@@ -1,0 +1,29 @@
+# fly.toml — CPM Runner on Fly.io
+#
+# This app hosts the Docker image in fly's registry and provides the target
+# for ephemeral machine runs. There is no persistent service — machines spin
+# up on demand and self-delete after the task completes.
+#
+# One-time setup:
+#   1. Set app name and org below (app names are globally unique on fly.io)
+#   2. fly launch --copy-config --no-deploy --org <your-org-slug>
+#   3. fly auth docker                         ← authenticate docker to fly registry
+#   4. npm run fly:build                       ← build + push image to fly registry
+#
+# Find your org slug: fly orgs list
+#
+# After setup, run tasks with:
+#   npm run fly                                ← uses token from macOS Keychain
+#   npm run fly:push-token                     ← re-push token when it expires (~29h)
+
+app = "cpm-claude-code-demo"       # ← CHANGE THIS to your unique app name (globally unique)
+org = "webhouse"         # fly orgs list → personal | webhouse
+primary_region = "arn"   # ← change to your preferred region (ams, lax, ord, sin...)
+
+[build]
+  dockerfile = "Dockerfile"
+
+# No [[services]] or [http_service] — this is a batch runner, not a web server.
+# Machines are launched on demand and auto-deleted after each run (--rm).
+#
+# Future: add a [mounts] section to give cc a persistent workspace volume.

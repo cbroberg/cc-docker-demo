@@ -71,6 +71,8 @@ function printBanner(runtimes) {
   console.log(`║  Docker Engine:    ${runtimes.docker  ? '✅ Available' : '❌ Not found'}                             ║`);
   console.log(`║  Docker Sandbox:   ${runtimes.sandbox ? '✅ Available' : '⬜ Not found (needs Docker Desktop 4.58+)'}  ║`);
   console.log(`║  Podman:           ${runtimes.podman  ? '✅ Available' : '⬜ Not found'}                             ║`);
+  console.log(`║  Fly.io CLI:       ${runtimes.fly     ? '✅ Available' : '⬜ Not found (brew install flyctl)'}                  ║`);
+  console.log(`║  Incus/koi:        ${runtimes.incus   ? '✅ Available' : '⬜ Not found (see docs/sandbox-tool-claude-code-incus.txt)'}  ║`);
   console.log('╚══════════════════════════════════════════════════════════════╝');
   console.log('');
 }
