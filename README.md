@@ -42,10 +42,27 @@ npm run fly         # Mode C: Fly.io ephemeral machine
 
 ## Prerequisites
 
-### Mode A (Docker/Podman)
-- Docker Engine or Podman
+### Mode A (Docker)
+- Docker Engine or Docker Desktop
 - Authenticated Claude Code (`claude` runs without login prompt)
 - Claude Max plan
+
+### Mode A (Podman)
+Podman is a daemonless, rootless Docker-compatible alternative. Install:
+
+```bash
+brew install podman
+podman machine init    # download Linux VM (one-time, ~500MB)
+podman machine start   # start VM
+npm run podman
+```
+
+The Podman VM persists between reboots but must be started manually:
+```bash
+podman machine start   # if not already running
+```
+
+**Note:** Podman containers don't create `/.dockerenv`, so environment detection inside cc will differ from Docker. Everything else is identical — same Dockerfile, same token auth, same workspace mount.
 
 ### Mode B (Docker Sandbox)
 - Docker Desktop **4.58+** (released Jan 2026)
