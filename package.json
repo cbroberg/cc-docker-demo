@@ -14,7 +14,8 @@
     "sandbox:list": "docker sandbox ls",
     "fly": "node mode-fly.mjs",
     "fly:build": "node mode-fly.mjs --build-only",
-    "fly:build:remote": "fly deploy --build-only"
+    "fly:build:remote": "fly deploy --build-only",
+    "push-token": "node push-token.mjs"
   },
   "dependencies": {
     "dotenv": "^16.4.7"
