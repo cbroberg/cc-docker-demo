@@ -97,7 +97,21 @@ git clone https://github.com/cbroberg/cc-docker-demo ~/cc-docker-demo
 cd ~/cc-docker-demo && npm install
 ```
 
-**Token relay from Mac to Ubuntu:**
+**Token management on Ubuntu:**
+
+If Claude Code CLI is installed and authenticated on the Ubuntu box, no token relay is needed. The script reads `~/.claude/.credentials.json` automatically and auto-renews when the token is near expiry:
+
+```bash
+# Ensure claude is in PATH (one-time)
+echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc
+
+# Run — token is read and auto-renewed locally
+npm run docker
+```
+
+Auto-renewal fires when the token has < 2h remaining: the script runs `claude -p "hi" --max-turns 1`, which triggers an OAuth refresh and writes the new token back to `~/.claude/.credentials.json`.
+
+**Token relay from Mac (alternative, for machines without CC installed):**
 ```bash
 # On macOS — push token from Keychain to remote .env
 npm run push-token                        # default host "ubuntu", default dir ~/cc-docker-demo
@@ -147,11 +161,14 @@ Token is auto-extracted from macOS Keychain on each run — no manual refresh ne
 ## How Auth Works
 
 ### Mode A & C: OAuth Token
-The script auto-extracts your token using a 3-step fallback:
 
-1. **Environment variable** — `CLAUDE_CODE_OAUTH_TOKEN` (from `.env` or `export`)
-2. **macOS Keychain** — Claude Code stores credentials under service `"Claude Code-credentials"` as a JSON blob
-3. **Legacy file** — `~/.claude/.credentials.json` (older cc versions)
+The script resolves the token using a 3-step fallback, and **auto-renews** before each run if the token is expired or has less than 2 hours remaining:
+
+1. **Environment variable** — `CLAUDE_CODE_OAUTH_TOKEN` (from `.env` or `export`) — auto-renewal skipped, token is externally managed
+2. **macOS Keychain** — `"Claude Code-credentials"` JSON blob — renewed token written back to Keychain
+3. **`~/.claude/.credentials.json`** — used on Linux or as macOS fallback — renewed token written back to file
+
+Auto-renewal runs `claude -p "hi" --max-turns 1`, which triggers an OAuth refresh via CC before making any API call. The script searches common install locations if `claude` is not in PATH (e.g. `~/.local/bin/claude` on Linux).
 
 For Mode A, the token is passed as env var to the container. For Mode C, it is passed via `--env` in `fly machine run` — transmitted over HTTPS to the Fly API, not visible in shell history or logs.
 
@@ -237,12 +254,17 @@ cc-docker-demo/
 
 ## Troubleshooting
 
-### "OAuth token expired"
+### "OAuth token expired" / auto-renewal failed
+The script auto-renews tokens below 2h. If renewal fails (e.g. `claude` not found):
 ```bash
-# Refresh by using Claude Code in your terminal
+# macOS — just use claude in your terminal
 claude
-# Or re-extract and update .env:
-node extract-token.mjs
+
+# Linux — run with full path if not in PATH
+~/.local/bin/claude -p "hi" --max-turns 1
+
+# Ensure claude is in PATH permanently
+echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc
 ```
 
 ### Mode A: "No OAuth token found"

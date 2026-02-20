@@ -70,8 +70,10 @@ node extract-token.mjs [--token-only | --export | --json]
 Parses `--mode` and `--runtime` args, calls `detectRuntimes()`, dispatches to mode functions. Prints a comparison table when both A and B run.
 
 ### `lib/common.mjs` — shared utilities
-- `resolveToken()`: 3-step fallback — env var → macOS Keychain service `"Claude Code-credentials"` → `~/.claude/.credentials.json`
-- `createWorkspace()`: creates temp dir under `realpathSync('/tmp')` on macOS (resolves to `/private/tmp`) — NOT `os.tmpdir()` which returns `/var/folders/...` that Docker Sandbox cannot sync
+- `resolveToken()`: calls `autoRenewIfNeeded()` first, then 3-step fallback — env var → macOS Keychain → `~/.claude/.credentials.json`
+- `autoRenewIfNeeded()`: checks token expiry; if < 2h (or expired), runs `claude -p "hi" --max-turns 1` via `findClaudeBinary()`. Skipped when env var token is set.
+- `findClaudeBinary()`: probes `claude` in PATH, then `~/.local/bin/claude`, `/usr/local/bin/claude`, `~/.npm-global/bin/claude` — handles SSH non-interactive shells that don't source `~/.bashrc`
+- `createWorkspace()`: creates temp dir under `realpathSync('/tmp')` on macOS (resolves to `/private/tmp`) — NOT `os.tmpdir()` which returns `/var/folders/...` that Docker Sandbox cannot sync. On Linux: `chmodSync(dir, 0o777)` so Docker's agent user (different UID) can write.
 - `detectRuntimes()`: checks availability of `docker`, `docker sandbox`, `podman`, `fly`, `koi`
 - `TEST_PROMPT`: fixed prompt cc executes inside all modes (creates and runs `hello.mjs`)
 
@@ -128,7 +130,8 @@ App config for `cpm-claude-code-demo` in webhouse org, region `arn` (Stockholm).
 - **Mode A/C**: `resolveToken()` checks: `CLAUDE_CODE_OAUTH_TOKEN` env → macOS Keychain → `~/.claude/.credentials.json`. Token expires ~29h. `node extract-token.mjs` refreshes `.env` from Keychain. For autonomous overnight runs: 29h window is sufficient if token is fresh at task start.
 - **Mode B**: Does NOT use Docker Desktop's host-side proxy for auth (that only works with Docker Desktop's own Claude account, not Claude Code CLI credentials). Instead, `mode-sandbox.mjs` reads the full credentials JSON from macOS Keychain and pipes it into `~/.claude/.credentials.json` inside the persistent sandbox via `docker sandbox exec -i` before each run.
 - **Mode C**: `fly secrets` cannot be used for apps with no persistent machines (secrets get staged but never deployed). Token is passed directly via `--env` in `fly machine run`.
-- **Linux / remote machines**: No Keychain on Linux. Use `push-token.mjs` to SSH from macOS and write `CLAUDE_CODE_OAUTH_TOKEN` to the remote `.env`. Re-run after each 29h expiry. `CPM_REMOTE_DIR` env var overrides the default `$HOME/cc-docker-demo` path.
+- **Linux with CC installed**: `resolveToken()` reads `~/.claude/.credentials.json` directly (Priority 3). Auto-renewal runs `claude -p "hi" --max-turns 1` when token < 2h — no push-token needed. `findClaudeBinary()` probes `~/.local/bin/claude` and other known locations since SSH non-interactive shells don't source `~/.bashrc`. Add `export PATH="$HOME/.local/bin:$PATH"` to `~/.bashrc` for interactive sessions.
+- **Linux without CC**: Use `push-token.mjs` to SSH from macOS and write `CLAUDE_CODE_OAUTH_TOKEN` to the remote `.env`. Re-run after each 29h expiry. `CPM_REMOTE_DIR` env var overrides the default `$HOME/cc-docker-demo` path.
 
 ## Docker Sandbox Gotchas (discovered through testing)
 
