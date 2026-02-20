@@ -1,54 +1,117 @@
-// extract-token.mjs
-// Reads the Claude Code OAuth access token from ~/.claude/.credentials.json
-// Use this to populate your .env file
+#!/usr/bin/env node
 
-import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
-import { homedir } from 'node:os';
+/**
+ * extract-token.mjs
+ * 
+ * Extracts Claude Code OAuth token from macOS Keychain
+ * and writes it to .env file for Docker injection.
+ * 
+ * Usage:
+ *   node extract-token.mjs              # Write to .env + show summary
+ *   node extract-token.mjs --token-only  # Raw token to stdout (for piping)
+ *   node extract-token.mjs --json        # Full JSON output
+ *   node extract-token.mjs --no-write    # Show only, don't touch .env
+ */
 
-const CREDENTIALS_PATH = join(homedir(), '.claude', '.credentials.json');
+import { execSync } from 'node:child_process';
+import { writeFileSync, readFileSync, existsSync } from 'node:fs';
 
-try {
-  const raw = readFileSync(CREDENTIALS_PATH, 'utf-8');
-  const creds = JSON.parse(raw);
-  const oauth = creds.claudeAiOauth;
+const KEYCHAIN_SERVICE = 'Claude Code-credentials';
+const ENV_FILE = '.env';
+const ENV_KEY = 'CLAUDE_CODE_OAUTH_TOKEN';
 
-  if (!oauth?.accessToken) {
-    console.error('❌ No OAuth token found. Run "claude" first to authenticate.');
+function getOAuth() {
+  if (process.platform !== 'darwin') {
+    console.error('❌ Requires macOS (Keychain access)');
     process.exit(1);
   }
 
-  const expiresAt = new Date(oauth.expiresAt);
-  const now = new Date();
-  const hoursLeft = ((expiresAt - now) / 1000 / 60 / 60).toFixed(1);
-
-  console.log('╔══════════════════════════════════════════════════╗');
-  console.log('║  Claude Code OAuth Token                        ║');
-  console.log('╠══════════════════════════════════════════════════╣');
-  console.log(`║  Token:   ${oauth.accessToken.slice(0, 20)}...`);
-  console.log(`║  Expires: ${expiresAt.toLocaleString()}`);
-  console.log(`║  Hours:   ${hoursLeft}h remaining`);
-  console.log('╠══════════════════════════════════════════════════╣');
-
-  if (hoursLeft <= 0) {
-    console.log('║  ⚠️  TOKEN EXPIRED — run "claude" to refresh     ║');
-  } else if (hoursLeft < 2) {
-    console.log('║  ⚠️  TOKEN EXPIRING SOON — consider refreshing   ║');
-  } else {
-    console.log('║  ✅ Token is valid                                ║');
-  }
-
-  console.log('╚══════════════════════════════════════════════════╝');
-  console.log('');
-  console.log('# Copy-paste this into your .env file:');
-  console.log(`CLAUDE_CODE_OAUTH_TOKEN=${oauth.accessToken}`);
-
-} catch (err) {
-  if (err.code === 'ENOENT') {
-    console.error(`❌ Credentials file not found: ${CREDENTIALS_PATH}`);
+  let raw;
+  try {
+    raw = execSync(
+      `security find-generic-password -s "${KEYCHAIN_SERVICE}" -w`,
+      { encoding: 'utf-8', timeout: 10000, stdio: ['pipe', 'pipe', 'pipe'] }
+    ).trim();
+  } catch {
+    console.error(`❌ Keychain entry "${KEYCHAIN_SERVICE}" not found`);
     console.error('   Run "claude" in terminal first to authenticate.');
-  } else {
-    console.error('❌ Error reading credentials:', err.message);
+    process.exit(1);
   }
-  process.exit(1);
+
+  const oauth = JSON.parse(raw)?.claudeAiOauth;
+  if (!oauth?.accessToken) {
+    console.error('❌ No accessToken in Keychain data');
+    process.exit(1);
+  }
+
+  const remainingMs = oauth.expiresAt - Date.now();
+  if (remainingMs <= 0) {
+    console.error('❌ Token EXPIRED — run "claude" to refresh');
+    process.exit(1);
+  }
+
+  return { ...oauth, remainingHours: (remainingMs / 3600000).toFixed(1) };
+}
+
+function writeEnvFile(token) {
+  const line = `${ENV_KEY}=${token}`;
+
+  if (existsSync(ENV_FILE)) {
+    let content = readFileSync(ENV_FILE, 'utf-8');
+    const regex = new RegExp(`^${ENV_KEY}=.*$`, 'm');
+
+    if (regex.test(content)) {
+      content = content.replace(regex, line);
+      writeFileSync(ENV_FILE, content);
+      return 'updated';
+    } else {
+      writeFileSync(ENV_FILE, content.trimEnd() + '\n' + line + '\n');
+      return 'appended';
+    }
+  } else {
+    writeFileSync(ENV_FILE, line + '\n');
+    return 'created';
+  }
+}
+
+// ── Main ──
+const oauth = getOAuth();
+const mask = (t) => t.slice(0, 16) + '...' + t.slice(-6);
+
+if (process.argv.includes('--token-only')) {
+  process.stdout.write(oauth.accessToken);
+
+} else if (process.argv.includes('--json')) {
+  console.log(JSON.stringify({
+    accessToken: oauth.accessToken,
+    refreshToken: oauth.refreshToken,
+    expiresAt: oauth.expiresAt,
+    expiresIn: `${oauth.remainingHours}h`,
+    subscriptionType: oauth.subscriptionType,
+    rateLimitTier: oauth.rateLimitTier,
+  }, null, 2));
+
+} else {
+  // Default: write to .env + show summary
+  const noWrite = process.argv.includes('--no-write');
+
+  if (!noWrite) {
+    const action = writeEnvFile(oauth.accessToken);
+    console.log(`✅ .env ${action} with ${ENV_KEY}`);
+  }
+
+  console.log(`🔑 Token:   ${mask(oauth.accessToken)}`);
+  console.log(`⏰ Expires: ${new Date(oauth.expiresAt).toLocaleString()} (${oauth.remainingHours}h)`);
+  console.log(`📋 Plan:    ${oauth.subscriptionType} (${oauth.rateLimitTier})`);
+
+  if (!noWrite) {
+    console.log('');
+    console.log('   Ready to run: npm run docker');
+  }
+}
+
+// ── Programmatic export ──
+export function getToken() {
+  const oauth = getOAuth();
+  return oauth;
 }
