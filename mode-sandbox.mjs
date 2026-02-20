@@ -5,29 +5,33 @@
 //
 // Key differences from Mode A:
 //   - microVM isolation (separate kernel, not shared)
-//   - Credentials handled by Docker Desktop's host-side proxy
+//   - Credentials injected via docker sandbox exec → ~/.claude/.credentials.json
 //   - Built-in network allow/deny lists
 //   - No custom Dockerfile needed — Docker provides the agent template
 //   - Workspace syncs at same absolute path (not volume mount)
-//   - No CLAUDE_CODE_OAUTH_TOKEN needed if already logged into claude
+//
+// Persistence: uses a fixed sandbox name (cpm-demo-persistent) so credentials
+// survive between runs. Credentials are re-injected from macOS Keychain before
+// each run, so the 29h token rotation is handled automatically.
 //
 // Useful lifecycle commands:
 //   docker sandbox ls                             — list all sandboxes (NOT in docker ps)
-//   docker sandbox exec -it <name> bash          — debug shell inside running sandbox
-//   docker sandbox rm <name>                     — delete sandbox and all installed packages
-//   docker sandbox run <name>                    — reconnect to an existing sandbox
-//
-// Immutability: sandbox config (volumes, env vars) cannot be changed after creation.
-// To reconfigure, delete and recreate. That's why we use a timestamp-based name.
+//   docker sandbox exec -it cpm-demo-persistent bash  — debug shell inside sandbox
+//   docker sandbox rm cpm-demo-persistent         — delete sandbox (forces recreation)
 //
 // Docker-in-Docker: add --mount-docker to give the agent access to the host Docker daemon.
 // This is equivalent to root access — only use when you fully trust the agent's actions.
 
-import { spawn, execSync } from 'node:child_process';
-import { createWorkspace, showWorkspaceResults, TEST_PROMPT } from './lib/common.mjs';
+import { spawn, spawnSync, execSync } from 'node:child_process';
+import { mkdirSync, writeFileSync, readFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { homedir } from 'node:os';
+import { showWorkspaceResults, TEST_PROMPT } from './lib/common.mjs';
 
 const MAX_TURNS = 20;
-const SANDBOX_NAME = `cpm-demo-${Date.now()}`;
+const SANDBOX_NAME = 'cpm-demo-persistent';
+const SANDBOX_WORKSPACE = '/private/tmp/cpm-sandbox-workspace';
+const KEYCHAIN_SERVICE = 'Claude Code-credentials';
 
 function checkSandboxAvailable() {
   try {
@@ -38,41 +42,111 @@ function checkSandboxAvailable() {
     console.error('❌ Docker Sandbox not available.');
     console.error('   Requires Docker Desktop 4.58+ (macOS or Windows).');
     console.error('   Install/upgrade: https://www.docker.com/products/docker-desktop/');
-    console.error('');
-    console.error('   On Linux: Docker Sandbox is experimental (single user, UID 1000 only).');
     return false;
   }
 }
 
-function warnOrphanedSandboxes() {
-  // Sandboxes persist after disconnection or failed runs — they don't appear
-  // in `docker ps` (they're microVMs), so they're easy to miss and pile up.
+function sandboxExists() {
   try {
-    const output = execSync('docker sandbox ls 2>/dev/null', { encoding: 'utf-8' }).trim();
-    const orphans = output.split('\n').filter(line => line.includes('cpm-demo-'));
-    if (orphans.length > 0) {
-      console.warn(`⚠️  Found ${orphans.length} orphaned sandbox(es) from previous runs:`);
-      orphans.forEach(line => console.warn(`   ${line.trim()}`));
-      console.warn('   Clean up with: docker sandbox rm <name>');
-      console.warn('   Or list all: npm run sandbox:list');
-      console.warn('');
-    }
+    const output = execSync('docker sandbox ls 2>/dev/null', { encoding: 'utf-8' });
+    return output.split('\n').some(line => line.includes(SANDBOX_NAME));
   } catch {
-    // sandbox ls failed — not blocking
+    return false;
   }
 }
 
-function checkCredentials() {
-  // Docker Sandbox uses a host-side proxy for credential injection.
-  // If ANTHROPIC_API_KEY is set globally, the proxy injects it automatically.
-  // For Claude Max plan: user must be logged in to claude via `claude` CLI first.
-  //
-  // The sandbox daemon reads env vars from shell config (~/.bashrc, ~/.zshrc),
-  // NOT from the current shell session. This is a known gotcha.
+function readHostCredentials() {
+  // Priority 1: macOS Keychain (Claude Code 2025+)
+  if (process.platform === 'darwin') {
+    try {
+      const raw = execSync(
+        `security find-generic-password -s "${KEYCHAIN_SERVICE}" -w`,
+        { encoding: 'utf-8', timeout: 10000, stdio: ['pipe', 'pipe', 'pipe'] }
+      ).trim();
+      const creds = JSON.parse(raw);
+      if (creds?.claudeAiOauth?.accessToken) {
+        const hoursLeft = ((creds.claudeAiOauth.expiresAt - Date.now()) / 3600000).toFixed(1);
+        console.log(`🔑 Credentials: macOS Keychain (${hoursLeft}h remaining)`);
+        return raw;
+      }
+    } catch { /* fall through */ }
+  }
 
-  console.log('🔑 Credentials: Docker Sandbox host-side proxy');
-  console.log('   (Docker Desktop injects credentials automatically)');
-  console.log('   If auth fails: run "claude" on host to login, then restart Docker Desktop.');
+  // Priority 2: legacy credentials file
+  const credPath = join(homedir(), '.claude', '.credentials.json');
+  try {
+    const raw = readFileSync(credPath, 'utf-8');
+    const creds = JSON.parse(raw);
+    if (creds?.claudeAiOauth?.accessToken) {
+      console.log('🔑 Credentials: ~/.claude/.credentials.json');
+      return raw;
+    }
+  } catch { /* fall through */ }
+
+  throw new Error('No Claude credentials found. Run "claude" to authenticate first.');
+}
+
+function injectCredentials() {
+  const credsJson = readHostCredentials();
+  const claudeJson = JSON.stringify({ hasCompletedOnboarding: true });
+
+  // Write credentials.json into sandbox via stdin pipe (-i = keep stdin open)
+  const r1 = spawnSync('docker', [
+    'sandbox', 'exec', '-i', SANDBOX_NAME,
+    'bash', '-c', 'mkdir -p ~/.claude && cat > ~/.claude/.credentials.json'
+  ], { input: credsJson, encoding: 'utf-8' });
+
+  if (r1.status !== 0) {
+    throw new Error(`Failed to inject credentials: ${r1.stderr}`);
+  }
+
+  // Write ~/.claude.json (skip onboarding prompt)
+  const r2 = spawnSync('docker', [
+    'sandbox', 'exec', '-i', SANDBOX_NAME,
+    'bash', '-c', 'cat > ~/.claude.json'
+  ], { input: claudeJson, encoding: 'utf-8' });
+
+  if (r2.status !== 0) {
+    throw new Error(`Failed to write ~/.claude.json: ${r2.stderr}`);
+  }
+
+  console.log('   Credentials injected into sandbox.');
+}
+
+function ensureSandboxReady() {
+  if (sandboxExists()) {
+    console.log(`♻️  Reusing persistent sandbox: ${SANDBOX_NAME}`);
+  } else {
+    console.log(`🆕 Creating persistent sandbox: ${SANDBOX_NAME}`);
+
+    // Ensure workspace exists on host
+    mkdirSync(SANDBOX_WORKSPACE, { recursive: true });
+
+    // Create sandbox by running --version (no auth needed, exits cleanly)
+    const create = spawnSync('docker', [
+      'sandbox', 'run', '--name', SANDBOX_NAME,
+      'claude', SANDBOX_WORKSPACE,
+      '--', '--version'
+    ], { stdio: 'pipe', encoding: 'utf-8' });
+
+    if (create.status !== 0) {
+      throw new Error(`Failed to create sandbox: ${create.stderr}`);
+    }
+    console.log('   Sandbox created.');
+  }
+
+  // Inject fresh credentials from host Keychain (handles token rotation automatically)
+  injectCredentials();
+}
+
+function prepareWorkspace() {
+  mkdirSync(SANDBOX_WORKSPACE, { recursive: true });
+  writeFileSync(join(SANDBOX_WORKSPACE, 'package.json'), JSON.stringify({
+    name: 'docker-test-project',
+    version: '1.0.0',
+    type: 'module'
+  }, null, 2));
+  return SANDBOX_WORKSPACE;
 }
 
 export async function runModeSandbox() {
@@ -80,33 +154,32 @@ export async function runModeSandbox() {
   console.log('╔══════════════════════════════════════════════════╗');
   console.log('║  Mode B: Docker Sandbox (microVM)               ║');
   console.log('║  Isolation: microVM (dedicated kernel)           ║');
-  console.log('║  Auth: Docker Desktop host-side proxy            ║');
+  console.log('║  Auth: Keychain → sandbox exec injection         ║');
   console.log('║  Network: Built-in allow/deny lists              ║');
   console.log('╚══════════════════════════════════════════════════╝');
   console.log('');
 
   // 1. Check sandbox available
-  warnOrphanedSandboxes();
   if (!checkSandboxAvailable()) {
     return { mode: 'sandbox', exitCode: 1, error: 'Docker Sandbox not available' };
   }
 
-  // 2. Check credentials
-  checkCredentials();
+  // 2. Ensure sandbox exists and credentials are fresh
+  try {
+    ensureSandboxReady();
+  } catch (err) {
+    console.error(`❌ ${err.message}`);
+    return { mode: 'sandbox', exitCode: 1, error: err.message };
+  }
 
-  // 3. Create workspace
-  const workspace = createWorkspace();
+  // 3. Prepare workspace
+  const workspace = prepareWorkspace();
 
-  // 4. Build sandbox run command
-  //    Syntax: docker sandbox run [options] <agent> [agent-options]
-  //    Agent options are passed after 'claude' and forwarded to cc
+  // 4. Build run command (reconnect to existing sandbox)
   const args = [
     'sandbox', 'run',
-    '--name', SANDBOX_NAME,
-    '--workspace', workspace,
-    // Agent: claude
-    'claude',
-    // Agent options (forwarded to cc inside the sandbox):
+    SANDBOX_NAME,
+    '--',
     '-p',                                // Headless prompt mode
     '--dangerously-skip-permissions',    // YOLO mode
     '--max-turns', String(MAX_TURNS),
@@ -115,12 +188,10 @@ export async function runModeSandbox() {
   ];
 
   console.log('');
-  console.log(`🚀 Spawning cc in Docker Sandbox microVM...`);
-  console.log(`   Sandbox:    ${SANDBOX_NAME}`);
+  console.log(`🚀 Running cc in Docker Sandbox microVM...`);
+  console.log(`   Sandbox:    ${SANDBOX_NAME} (persistent)`);
   console.log(`   Max turns:  ${MAX_TURNS}`);
   console.log(`   Workspace:  ${workspace}`);
-  console.log('');
-  console.log('   ℹ️  First run may take 1-2 min (pulling microVM template image)');
   console.log('');
   console.log('─'.repeat(60));
   console.log('  CC OUTPUT (from microVM)');
@@ -145,7 +216,6 @@ export async function runModeSandbox() {
     proc.stderr.on('data', (chunk) => {
       const text = chunk.toString();
       stderr += text;
-      // Show all stderr for sandbox mode — useful for debugging
       if (text.trim()) {
         process.stderr.write(`   [sandbox] ${text}`);
       }
@@ -155,7 +225,7 @@ export async function runModeSandbox() {
     proc.on('error', (err) => reject(new Error(`Failed to spawn docker sandbox: ${err.message}`)));
   });
 
-  const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
+  const elapsed = ((Date.now() - startTime) / 1000).toFixed(1)
 
   // 6. Report
   console.log('');
@@ -174,17 +244,10 @@ export async function runModeSandbox() {
 
   showWorkspaceResults(workspace);
 
-  // 7. Cleanup sandbox
   console.log('');
-  console.log(`🧹 Cleaning up sandbox: ${SANDBOX_NAME}`);
-  try {
-    execSync(`docker sandbox rm ${SANDBOX_NAME} 2>/dev/null`, { stdio: 'pipe' });
-    console.log('   Sandbox removed.');
-  } catch {
-    console.log(`   Note: run "docker sandbox rm ${SANDBOX_NAME}" to clean up manually.`);
-  }
-
-  console.log(`📁 Workspace preserved at: ${workspace}`);
+  console.log(`📦 Sandbox preserved: ${SANDBOX_NAME}`);
+  console.log(`   To inspect: docker sandbox exec -it ${SANDBOX_NAME} bash`);
+  console.log(`   To reset:   docker sandbox rm ${SANDBOX_NAME}`);
 
   return { mode: 'sandbox', exitCode: result.code, elapsed, workspace };
 }
