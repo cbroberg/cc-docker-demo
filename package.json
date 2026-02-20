@@ -1,0 +1,18 @@
+{
+  "name": "cc-docker-demo",
+  "version": "2.0.0",
+  "type": "module",
+  "description": "CPM v4 Demo: Run Claude Code in Docker container vs Docker Sandbox (microVM)",
+  "scripts": {
+    "start": "node run-demo.mjs",
+    "docker": "node run-demo.mjs --mode docker",
+    "sandbox": "node run-demo.mjs --mode sandbox",
+    "both": "node run-demo.mjs --mode both",
+    "podman": "node run-demo.mjs --mode docker --runtime podman",
+    "build": "docker build -t cpm-runner:demo .",
+    "token:show": "node extract-token.mjs"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.7"
+  }
+}
